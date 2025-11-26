@@ -1,0 +1,634 @@
+"use client"
+
+import { useState, useEffect } from "react"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { DashboardSection } from "./dashboard-section"
+import { useProjectConfig } from "@/lib/project-config"
+import { ExternalLink } from "lucide-react"
+
+interface Link {
+  id: string
+  title: string
+  description: string
+  url: string
+  type: string
+}
+
+const LINK_TYPES = [
+  { value: "notion", label: "Notion" },
+  { value: "drive", label: "Google Drive" },
+  { value: "github", label: "GitHub" },
+  { value: "slack", label: "Slack" },
+  { value: "figma", label: "Figma" },
+  { value: "jira", label: "Jira" },
+  { value: "confluence", label: "Confluence" },
+  { value: "trello", label: "Trello" },
+  { value: "asana", label: "Asana" },
+  { value: "miro", label: "Miro" },
+  { value: "docs", label: "Documentation" },
+  { value: "api", label: "API" },
+  { value: "other", label: "Other" },
+]
+
+export function GuidesDocsSection() {
+  const config = useProjectConfig()
+  const [customLinks, setCustomLinks] = useState<Link[]>([])
+  const [documentsLoaded, setDocumentsLoaded] = useState(false)
+  const [syncAttempted, setSyncAttempted] = useState(false)
+  const [open, setOpen] = useState(false)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editingConfigType, setEditingConfigType] = useState<"drive" | "notion" | "github" | null>(null)
+  const [formData, setFormData] = useState({
+    title: "",
+    url: "",
+    description: "",
+    type: "other"
+  })
+
+  // Load custom links from Notion documents database
+  useEffect(() => {
+    if (config?.notionDatabases?.documents) {
+      setDocumentsLoaded(false)
+      setSyncAttempted(false)
+      fetchDocuments()
+    }
+  }, [config?.notionDatabases?.documents])
+
+  // Sync configured links to documents database on initialization
+  useEffect(() => {
+    const syncConfiguredLinks = async () => {
+      // Only sync once after documents have been loaded
+      if (!config?.notionDatabases?.documents || !documentsLoaded || syncAttempted) return
+
+      console.log("[GuidesDocsSection] Starting sync check with", customLinks.length, "existing documents")
+
+      // Check if there are any configured links to sync
+      const hasDrive = config?.googleDrive?.folderId && config?.googleDrive.folderId.trim() !== ""
+      const hasGitHub = config?.github?.owner && config?.github.owner.trim() !== "" &&
+                       config?.github?.repo && config?.github.repo.trim() !== ""
+
+      if (!hasDrive && !hasGitHub) {
+        setSyncAttempted(true)
+        return
+      }
+
+      try {
+        let needsRefresh = false
+
+        // Check and sync Google Drive link
+        if (hasDrive && config?.googleDrive) {
+          // Check by URL to avoid duplicates
+          const driveUrl = `https://drive.google.com/drive/folders/${config?.googleDrive.folderId}`
+          const existingDriveDoc = customLinks.find(link =>
+            link.url === driveUrl || link.type === "Google Drive"
+          )
+          if (!existingDriveDoc) {
+            console.log("[GuidesDocsSection] Syncing Drive link to documents database")
+            await fetch("/api/notion/documents", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                databaseId: config?.notionDatabases.documents,
+                title: config?.googleDrive.folderName || "Google Drive Folder",
+                url: driveUrl,
+                description: "Main project documentation",
+                type: "Google Drive",
+              }),
+            })
+            needsRefresh = true
+          } else {
+            console.log("[GuidesDocsSection] Drive link already exists")
+          }
+        }
+
+        // Check and sync GitHub repository link
+        if (hasGitHub && config?.github) {
+          // Check by URL to avoid duplicates
+          const githubUrl = `https://github.com/${config?.github.owner}/${config?.github.repo}`
+          const existingGitHubDoc = customLinks.find(link =>
+            link.url === githubUrl || link.type === "GitHub"
+          )
+          if (!existingGitHubDoc) {
+            console.log("[GuidesDocsSection] Syncing GitHub link to documents database")
+            await fetch("/api/notion/documents", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                databaseId: config?.notionDatabases.documents,
+                title: "GitHub Repository",
+                url: githubUrl,
+                description: "Source code repository",
+                type: "GitHub",
+              }),
+            })
+            needsRefresh = true
+          } else {
+            console.log("[GuidesDocsSection] GitHub link already exists")
+          }
+        }
+
+        // Mark sync as attempted to prevent running again
+        setSyncAttempted(true)
+
+        // Refresh documents only if we created new ones
+        if (needsRefresh) {
+          console.log("[GuidesDocsSection] Refreshing documents after sync")
+          await fetchDocuments()
+        }
+      } catch (error) {
+        console.error("[GuidesDocsSection] Error syncing configured links:", error)
+        setSyncAttempted(true) // Mark as attempted even on error
+      }
+    }
+
+    // Run sync when documents are first loaded
+    if (documentsLoaded && !syncAttempted) {
+      syncConfiguredLinks()
+    }
+  }, [documentsLoaded, syncAttempted, config?.notionDatabases?.documents, config?.googleDrive?.folderId, config?.github?.owner, config?.github?.repo, customLinks])
+
+  const fetchDocuments = async () => {
+    if (!config?.notionDatabases?.documents) return
+
+    try {
+      const response = await fetch(`/api/notion/documents?databaseId=${config?.notionDatabases.documents}`)
+      if (response.ok) {
+        const data = await response.json()
+        const documents = data.documents || []
+
+        // Remove duplicates by URL (keep the first one)
+        const uniqueDocuments: Link[] = []
+        const seenUrls = new Set<string>()
+
+        for (const doc of documents) {
+          if (!seenUrls.has(doc.url)) {
+            seenUrls.add(doc.url)
+            uniqueDocuments.push(doc)
+          } else {
+            // Delete duplicate from Notion
+            console.log("[GuidesDocsSection] Removing duplicate document:", doc.title, doc.url)
+            try {
+              await fetch(`/api/notion/documents?documentId=${doc.id}`, {
+                method: "DELETE",
+              })
+            } catch (err) {
+              console.error("[GuidesDocsSection] Error removing duplicate:", err)
+            }
+          }
+        }
+
+        setCustomLinks(uniqueDocuments)
+        setDocumentsLoaded(true)
+      }
+    } catch (error) {
+      console.error("Error fetching documents:", error)
+      setDocumentsLoaded(true) // Mark as loaded even on error to avoid blocking
+    }
+  }
+
+  const handleOpenAdd = () => {
+    setEditingId(null)
+    setEditingConfigType(null)
+    setFormData({ title: "", url: "", description: "", type: "other" })
+    setOpen(true)
+  }
+
+  const handleOpenEdit = (link: Link) => {
+    setEditingId(link.id)
+    setEditingConfigType(null)
+    const typeValue = LINK_TYPES.find(t => t.label === link.type)?.value || "other"
+    setFormData({
+      title: link.title,
+      url: link.url,
+      description: link.description,
+      type: typeValue
+    })
+    setOpen(true)
+  }
+
+  const handleEditConfigLink = (type: "drive" | "notion" | "github") => {
+    setEditingId(null)
+    setEditingConfigType(type)
+
+    if (type === "drive") {
+      setFormData({
+        title: config?.googleDrive?.folderName || "Google Drive Folder",
+        url: config?.googleDrive?.folderId || "",
+        description: "Main project documentation",
+        type: "drive"
+      })
+    } else if (type === "github") {
+      setFormData({
+        title: "GitHub Repository",
+        url: `${config?.github?.owner || ""}/${config?.github?.repo || ""}`,
+        description: "Source code repository",
+        type: "github"
+      })
+    }
+
+    setOpen(true)
+  }
+
+  const handleSaveLink = async () => {
+    if (!formData.title || !formData.url || !config) return
+
+    // Config links (Drive, GitHub) cannot be edited in new architecture, they come from .env
+    // This function now only handles custom link documents
+
+    // Handle custom links with Notion sync
+    if (!config?.notionDatabases?.documents) {
+      // Fallback to local state if no Notion database
+      const linkData = {
+        title: formData.title,
+        description: formData.description,
+        url: formData.url,
+        type: LINK_TYPES.find(t => t.value === formData.type)?.label || "Other"
+      }
+
+      if (editingId) {
+        setCustomLinks(customLinks.map(link =>
+          link.id === editingId ? { ...link, ...linkData } : link
+        ))
+      } else {
+        const newLink: Link = {
+          id: Date.now().toString(),
+          ...linkData
+        }
+        setCustomLinks([...customLinks, newLink])
+      }
+      setOpen(false)
+      setFormData({ title: "", url: "", description: "", type: "other" })
+      setEditingId(null)
+      return
+    }
+
+    // Sync with Notion
+    try {
+      const typeLabel = LINK_TYPES.find(t => t.value === formData.type)?.label || "Other"
+
+      if (editingId) {
+        // Update existing document
+        const response = await fetch("/api/notion/documents", {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            documentId: editingId,
+            title: formData.title,
+            url: formData.url,
+            description: formData.description,
+            type: typeLabel,
+          }),
+        })
+
+        if (response.ok) {
+          await fetchDocuments()
+        } else {
+          console.error("Failed to update document")
+        }
+      } else {
+        // Create new document
+        const response = await fetch("/api/notion/documents", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            databaseId: config?.notionDatabases.documents,
+            title: formData.title,
+            url: formData.url,
+            description: formData.description,
+            type: typeLabel,
+          }),
+        })
+
+        if (response.ok) {
+          await fetchDocuments()
+        } else {
+          const errorData = await response.json()
+          console.error("Failed to create document:", errorData)
+          alert(`Failed to create document: ${errorData.error}\n\nDetails: ${JSON.stringify(errorData.details, null, 2)}`)
+        }
+      }
+    } catch (error) {
+      console.error("Error saving document:", error)
+    }
+
+    setOpen(false)
+    setFormData({ title: "", url: "", description: "", type: "other" })
+    setEditingId(null)
+    setEditingConfigType(null)
+  }
+
+  const handleViewLink = (url: string) => {
+    if (url && url !== "Not configured") {
+      window.open(url, "_blank")
+    }
+  }
+
+  const handleDeleteLink = async (linkId: string) => {
+    if (!confirm("Êtes-vous sûr de vouloir supprimer ce lien ?")) return
+
+    if (!config?.notionDatabases?.documents) {
+      // Fallback to local state
+      setCustomLinks(customLinks.filter(link => link.id !== linkId))
+      return
+    }
+
+    // Sync with Notion
+    try {
+      const response = await fetch(`/api/notion/documents?documentId=${linkId}`, {
+        method: "DELETE",
+      })
+
+      if (response.ok) {
+        await fetchDocuments()
+      } else {
+        console.error("Failed to delete document")
+      }
+    } catch (error) {
+      console.error("Error deleting document:", error)
+    }
+  }
+
+  // Config links (Drive, GitHub) are read-only from .env in new architecture
+  // No delete functionality needed for config links
+
+  const detailedContent = (
+    <div className="space-y-6">
+      <div>
+        <div className="flex items-center justify-between mb-3">
+          <h4 className="font-semibold">Important Links & References</h4>
+          <Dialog open={open} onOpenChange={setOpen}>
+            <DialogTrigger asChild>
+              <Button size="sm" onClick={handleOpenAdd}>Add Link</Button>
+            </DialogTrigger>
+            <DialogContent className="sm:max-w-[525px]">
+              <DialogHeader>
+                <DialogTitle>
+                  {editingConfigType ? "Edit Configured Link" : editingId ? "Edit Link" : "Add New Link"}
+                </DialogTitle>
+                <DialogDescription>
+                  {editingConfigType
+                    ? "Update the configured link information. This will sync with Project Settings."
+                    : editingId
+                    ? "Update the link information below."
+                    : "Add a new link to your project resources. Choose a type and enter the URL."
+                  }
+                </DialogDescription>
+              </DialogHeader>
+              <div className="grid gap-4 py-4">
+                <div className="grid gap-2">
+                  <Label htmlFor="type">Type</Label>
+                  <Select
+                    value={formData.type}
+                    onValueChange={(value) => setFormData({ ...formData, type: value })}
+                    disabled={!!editingConfigType}
+                  >
+                    <SelectTrigger id="type">
+                      <SelectValue placeholder="Select link type" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {LINK_TYPES.map((type) => (
+                        <SelectItem key={type.value} value={type.value}>
+                          {type.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="title">Title</Label>
+                  <Input
+                    id="title"
+                    placeholder="e.g., Project Documentation"
+                    value={formData.title}
+                    onChange={(e) => setFormData({ ...formData, title: e.target.value })}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="url">
+                    {editingConfigType === "drive" && "Folder ID"}
+                    {editingConfigType === "notion" && "Database ID"}
+                    {editingConfigType === "github" && "Repository (owner/repo)"}
+                    {!editingConfigType && "URL"}
+                  </Label>
+                  <Input
+                    id="url"
+                    placeholder={
+                      editingConfigType === "drive" ? "1a2b3c4d5e6f..." :
+                      editingConfigType === "notion" ? "abc123def456..." :
+                      editingConfigType === "github" ? "owner/repo" :
+                      "https://..."
+                    }
+                    value={formData.url}
+                    onChange={(e) => setFormData({ ...formData, url: e.target.value })}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="description">Description (optional)</Label>
+                  <Input
+                    id="description"
+                    placeholder="Brief description..."
+                    value={formData.description}
+                    onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+                  />
+                </div>
+              </div>
+              <DialogFooter>
+                <Button type="button" variant="outline" onClick={() => setOpen(false)}>
+                  Cancel
+                </Button>
+                <Button type="button" onClick={handleSaveLink}>
+                  {editingId ? "Save Changes" : "Add Link"}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
+          {config?.googleDrive?.folderId && config?.googleDrive.folderId.trim() !== "" && (
+            <Card className="hover:shadow-md transition-shadow">
+              <CardContent className="p-3">
+                <div className="space-y-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex-1 min-w-0">
+                      <Badge variant="secondary" className="text-[9px] h-4 px-1.5 mb-1">Drive</Badge>
+                      <h5 className="font-semibold text-xs truncate">
+                        {config?.googleDrive?.folderName || "Google Drive"}
+                      </h5>
+                      <p className="text-[10px] text-muted-foreground line-clamp-2">Main project documentation</p>
+                    </div>
+                  </div>
+                  <div className="flex gap-1">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() =>
+                        window.open(
+                          `https://drive.google.com/drive/folders/${config?.googleDrive?.folderId}`,
+                          "_blank"
+                        )
+                      }
+                      className="h-6 px-2 text-[10px] flex-1"
+                    >
+                      <ExternalLink className="h-3 w-3" />
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => handleEditConfigLink("drive")}
+                      className="h-6 px-2 text-[10px]"
+                    >
+                      ✏️
+                    </Button>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {config?.projectPageId && (
+            <Card className="hover:shadow-md transition-shadow">
+              <CardContent className="p-3">
+                <div className="space-y-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex-1 min-w-0">
+                      <Badge variant="secondary" className="text-[9px] h-4 px-1.5 mb-1">Notion</Badge>
+                      <h5 className="font-semibold text-xs truncate">Project Page</h5>
+                      <p className="text-[10px] text-muted-foreground line-clamp-2">Main project Notion page</p>
+                    </div>
+                  </div>
+                  <div className="flex gap-1">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() =>
+                        window.open(
+                          `https://notion.so/${config?.projectPageId?.replace(/-/g, "")}`,
+                          "_blank"
+                        )
+                      }
+                      className="h-6 px-2 text-[10px] flex-1"
+                    >
+                      <ExternalLink className="h-3 w-3" />
+                    </Button>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {config?.github?.owner && config?.github.owner.trim() !== "" && config?.github?.repo && config?.github.repo.trim() !== "" && (
+            <Card className="hover:shadow-md transition-shadow">
+              <CardContent className="p-3">
+                <div className="space-y-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex-1 min-w-0">
+                      <Badge variant="secondary" className="text-[9px] h-4 px-1.5 mb-1">GitHub</Badge>
+                      <h5 className="font-semibold text-xs truncate">GitHub Repo</h5>
+                      <p className="text-[10px] text-muted-foreground line-clamp-2">Source code repository</p>
+                    </div>
+                  </div>
+                  <div className="flex gap-1">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() =>
+                        window.open(
+                          `https://github.com/${config?.github?.owner}/${config?.github?.repo}`,
+                          "_blank"
+                        )
+                      }
+                      className="h-6 px-2 text-[10px] flex-1"
+                    >
+                      <ExternalLink className="h-3 w-3" />
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => handleEditConfigLink("github")}
+                      className="h-6 px-2 text-[10px]"
+                    >
+                      ✏️
+                    </Button>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {customLinks.map((link) => (
+            <Card key={link.id} className="hover:shadow-md transition-shadow">
+              <CardContent className="p-3">
+                <div className="space-y-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex-1 min-w-0">
+                      <Badge variant="secondary" className="text-[9px] h-4 px-1.5 mb-1">{link.type}</Badge>
+                      <h5 className="font-semibold text-xs truncate">{link.title}</h5>
+                      <p className="text-[10px] text-muted-foreground line-clamp-2">{link.description}</p>
+                    </div>
+                  </div>
+                  <div className="flex gap-1">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => handleViewLink(link.url)}
+                      className="h-6 px-2 text-[10px] flex-1"
+                    >
+                      <ExternalLink className="h-3 w-3" />
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => handleOpenEdit(link)}
+                      className="h-6 px-2 text-[10px]"
+                    >
+                      ✏️
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => handleDeleteLink(link.id)}
+                      className="h-6 px-2 text-[10px] text-red-500 hover:text-red-700"
+                    >
+                      🗑️
+                    </Button>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+
+          {customLinks.length === 0 &&
+           !(config?.googleDrive?.folderId && config?.googleDrive.folderId.trim() !== "") &&
+           !(config?.github?.owner && config?.github.owner.trim() !== "" && config?.github?.repo && config?.github.repo.trim() !== "") &&
+           !config?.projectPageId && (
+            <div className="p-8 border rounded-lg text-center border-dashed">
+              <p className="text-sm text-muted-foreground">
+                No links added yet. Click &ldquo;Add Link&rdquo; to add your first resource link.
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+
+  return (
+    <DashboardSection
+      title="Guides and Docs"
+      description="Important links and references for project resources"
+      icon="📚"
+      detailedContent={detailedContent}
+      defaultOpen={true}
+    />
+  )
+}
